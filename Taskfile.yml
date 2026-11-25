@@ -1,0 +1,15 @@
+version: "3"
+
+tasks:
+  install:
+    desc: download project dependencies
+    cmds:
+      - go mod download
+
+  dev:start:
+    desc: start local development
+    env:
+      APP_ENV: local
+    cmds:
+      - task: install
+      - go tool air

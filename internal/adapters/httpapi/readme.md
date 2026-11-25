@@ -1,0 +1,3 @@
+# httpapi
+
+Inbound httpapi adapter.
