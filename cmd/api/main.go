@@ -49,7 +49,7 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.ListenAndServe() }()
-	l.Info("starting HTTP server", logger.F("addr", config.HttpServer.Addr))
+	l.Info("starting HTTP server", "addr", config.HttpServer.Addr)
 
 	select {
 	case <-signalCtx.Done():

@@ -52,37 +52,28 @@ func New(c Config) (*Logger, error) {
 	return &Logger{l: l.Sugar()}, nil
 }
 
-func (l *Logger) Debug(msg string, fields ...Field) {
-	l.l.Debugw(msg, zapFields(fields)...)
+func (l *Logger) Debug(msg string, args ...any) {
+	l.l.Debugw(msg, args...)
 }
 
-func (l *Logger) Info(msg string, fields ...Field) {
-	l.l.Infow(msg, zapFields(fields)...)
+func (l *Logger) Info(msg string, args ...any) {
+	l.l.Infow(msg, args...)
 }
 
-func (l *Logger) Warn(msg string, fields ...Field) {
-	l.l.Warnw(msg, zapFields(fields)...)
+func (l *Logger) Warn(msg string, args ...any) {
+	l.l.Warnw(msg, args...)
 }
 
-func (l *Logger) Error(msg string, fields ...Field) {
-	l.l.Errorw(msg, zapFields(fields)...)
+func (l *Logger) Error(msg string, args ...any) {
+	l.l.Errorw(msg, args...)
 }
 
-func (l *Logger) With(fields ...Field) *Logger {
-	return &Logger{l: l.l.With(zapFields(fields)...)}
+func (l *Logger) With(args ...any) *Logger {
+	return &Logger{l: l.l.With(args...)}
 }
 
 func (l *Logger) Sync() error {
 	return l.l.Sync()
-}
-
-func zapFields(fields []Field) []any {
-	args := make([]any, 0, len(fields)*2)
-	for _, field := range fields {
-		args = append(args, field.Key, field.Value)
-	}
-
-	return args
 }
 
 func buildOutput(format config.LogFormat) (zapcore.Encoder, zapcore.WriteSyncer, error) {
@@ -131,17 +122,5 @@ func baseEncoderConfig() zapcore.EncoderConfig {
 		CallerKey:      "caller",
 		EncodeDuration: zapcore.SecondsDurationEncoder,
 		EncodeCaller:   zapcore.ShortCallerEncoder,
-	}
-}
-
-type Field struct {
-	Key   string
-	Value any
-}
-
-func F(key string, value any) Field {
-	return Field{
-		Key:   key,
-		Value: value,
 	}
 }

@@ -10,10 +10,10 @@ log, err := logger.New(logger.Config{
 if err != nil {
     return err
 }
-log.Info("application started", logger.F("env", cfg.App.Env))
+log.Info("application started", "env", cfg.App.Env)
 ```
 
-`New` возвращает конкретный `*logger.Logger`. Методы `Debug`, `Info`, `Warn` и `Error` принимают сообщение и структурированные поля. Например, `log.Info("starting HTTP server", logger.F("addr", addr))` сохраняет адрес отдельным полем. `With` возвращает новый `*logger.Logger` с дополнительными полями, а `Sync` вызывает синхронизацию Zap при завершении работы приложения.
+`New` возвращает конкретный `*logger.Logger`. Методы `Debug`, `Info`, `Warn` и `Error` принимают сообщение и пары ключ–значение (`args ...any`). Например, `log.Info("starting HTTP server", "addr", addr)` сохраняет адрес отдельным полем. Ключи должны быть строками, и у каждого ключа должно быть значение. `With` принимает такие же пары и возвращает новый `*logger.Logger` с дополнительными полями, а `Sync` вызывает синхронизацию Zap при завершении работы приложения.
 
 Типы `LoggerConfig`, `LogLevel`, `LogFormat`, их декодирование и проверка находятся в `internal/config`. Формат `console` использует цвет при выводе в терминал; формат `json` подходит для структурированного вывода. Записи отправляются в стандартный поток ошибок.
 
