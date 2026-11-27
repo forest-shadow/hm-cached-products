@@ -12,4 +12,16 @@ tasks:
       APP_ENV: local
     cmds:
       - task: install
+      - task: dev:infra.up
       - go tool air
+
+  dev:infra.up:
+    desc: start local dev environment
+    cmds:
+      - docker compose up -d --wait postgres
+      - docker compose --profile dev run --rm migrate
+
+  dev:infra.down:
+    desc: stop local dev environment
+    cmds:
+      - docker compose --profile dev down

@@ -1,0 +1,1591 @@
+{
+  "info": {
+    "name": "Cached Product",
+    "description": "Ручная проверка текущего API. Импортируй JSON в Postman, задай base_url в переменных коллекции (по умолчанию http://localhost:8080). Запусти API с применёнными миграциями. Отдельный environment не нужен.\n\nВыполняй папки и запросы сверху вниз: Health → Products → Statistics → Validation errors → Cleanup. Можно запустить всю коллекцию через Collection Runner в том же порядке. Коллекция создаёт тестовый товар и удаляет его в Cleanup. Каждый отрицательный запрос проверяет ожидаемую ошибку, поэтому HTTP 400/404/409 здесь считается успешным тестом.\n\nPOST/GET/PUT автоматически сохраняют product_id и product_version. Для 409 используй старую версию, сохранённую перед PUT в stale_version. Значения ожидаются в переменных коллекции; не переопределяй product_id/product_version/stale_version в environment. Для повторного прогона начинай с создания нового товара.\n\nprice — целое число >= 0. name после удаления пробелов должен занимать от 1 до 200 байт. PUT требует name, price, expected_version > 0. Окна статистики: 1h, 24h, 7d, 30d, all; по умолчанию 24h. GET товара пока не добавляет просмотры, поэтому у нового товара статистика нулевая. /health проверяет только процесс. /metrics пока не реализован.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "noauth"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080",
+      "type": "string",
+      "description": "Адрес запущенного API без завершающего слеша."
+    },
+    {
+      "key": "product_id",
+      "value": "",
+      "type": "string",
+      "description": "Заполняется после успешного создания товара. Используется также для проверки 404 после удаления."
+    },
+    {
+      "key": "product_version",
+      "value": "",
+      "type": "string",
+      "description": "Текущая версия; обновляется после успешных POST, GET и PUT."
+    },
+    {
+      "key": "stale_version",
+      "value": "",
+      "type": "string",
+      "description": "Версия до последнего PUT; используется для воспроизведения конфликта 409."
+    },
+    {
+      "key": "stats_window",
+      "value": "24h",
+      "type": "string",
+      "description": "Допустимые значения: 1h, 24h, 7d, 30d, all."
+    }
+  ],
+  "item": [
+    {
+      "name": "01. Health",
+      "item": [
+        {
+          "name": "Проверить процесс — 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Статус процесса\", function () {",
+                  "    pm.expect(pm.response.json()).to.eql({ status: \"ok\" });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Проверяет доступность HTTP-процесса. Этот маршрут не проверяет подключение к PostgreSQL."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02. Products",
+      "description": "Выполняй запросы по порядку; успешные ответы заполняют переменные коллекции.",
+      "item": [
+        {
+          "name": "1. Создать товар — 201",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.unset(\"product_id\");",
+                  "pm.collectionVariables.unset(\"product_version\");",
+                  "pm.collectionVariables.unset(\"stale_version\");"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Формат товара\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.id).to.be.a(\"number\").and.above(0);",
+                  "    pm.expect(body.name).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(body.price).to.be.a(\"number\").and.at.least(0);",
+                  "    pm.expect(body.version).to.be.a(\"number\").and.above(0);",
+                  "    pm.expect(Number.isNaN(Date.parse(body.updated_at))).to.eql(false);",
+                  "});",
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set(\"product_id\", String(body.id));",
+                  "    pm.collectionVariables.set(\"product_version\", String(body.version));",
+                  "}",
+                  "pm.test(\"Location созданного товара\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Location\")).to.eql(\"/products/\" + pm.response.json().id);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Начни с этого запроса. Создаёт отдельный тестовый товар и сохраняет product_id и product_version на уровне коллекции. name и price обязательны; price — целое число >= 0. Каждый запуск создаёт новый товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman Tea\",\n  \"price\": 12900\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2. Получить товар — 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Формат товара\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.id).to.be.a(\"number\").and.above(0);",
+                  "    pm.expect(body.name).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(body.price).to.be.a(\"number\").and.at.least(0);",
+                  "    pm.expect(body.version).to.be.a(\"number\").and.above(0);",
+                  "    pm.expect(Number.isNaN(Date.parse(body.updated_at))).to.eql(false);",
+                  "});",
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set(\"product_id\", String(body.id));",
+                  "    pm.collectionVariables.set(\"product_version\", String(body.version));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Требует успешного создания товара. Обновляет product_version из ответа сервера."
+          },
+          "response": []
+        },
+        {
+          "name": "3. Обновить товар — 200",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"stale_version\", pm.collectionVariables.get(\"product_version\"));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Формат товара\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.id).to.be.a(\"number\").and.above(0);",
+                  "    pm.expect(body.name).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(body.price).to.be.a(\"number\").and.at.least(0);",
+                  "    pm.expect(body.version).to.be.a(\"number\").and.above(0);",
+                  "    pm.expect(Number.isNaN(Date.parse(body.updated_at))).to.eql(false);",
+                  "});",
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set(\"product_id\", String(body.id));",
+                  "    pm.collectionVariables.set(\"product_version\", String(body.version));",
+                  "}",
+                  "pm.test(\"Версия увеличилась после изменения\", function () {",
+                  "    pm.expect(pm.response.json().version).to.eql(Number(pm.collectionVariables.get(\"stale_version\")) + 1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Отправляет все поля name, price и expected_version. Сохраняет прежнюю версию в stale_version, а новую — в product_version. После создания товар изменится и его версия увеличится на 1. Для повторного воспроизведения конфликта создай товар заново.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman Tea — updated\",\n  \"price\": 14900,\n  \"expected_version\": {{product_version}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "4. Повторить PUT со старой версией — 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"PRODUCT_VERSION_CONFLICT\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Выполни после успешного изменения на шаге 3. Передаёт старую версию и ожидает PRODUCT_VERSION_CONFLICT. Сохранённая текущая версия не меняется.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman Tea — updated\",\n  \"price\": 14900,\n  \"expected_version\": {{stale_version}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "5. PUT без изменений — 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Версия не изменилась\", function () {",
+                  "    pm.expect(pm.response.json().version).to.eql(Number(pm.collectionVariables.get(\"product_version\")));",
+                  "});",
+                  "pm.test(\"Формат товара\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.id).to.be.a(\"number\").and.above(0);",
+                  "    pm.expect(body.name).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(body.price).to.be.a(\"number\").and.at.least(0);",
+                  "    pm.expect(body.version).to.be.a(\"number\").and.above(0);",
+                  "    pm.expect(Number.isNaN(Date.parse(body.updated_at))).to.eql(false);",
+                  "});",
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set(\"product_id\", String(body.id));",
+                  "    pm.collectionVariables.set(\"product_version\", String(body.version));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "После шага 3 отправляет те же name и price с текущей версией. Версия и updated_at при отсутствии изменений сохраняются.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman Tea — updated\",\n  \"price\": 14900,\n  \"expected_version\": {{product_version}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "03. Statistics",
+      "description": "Требует существующего product_id. Для выбранного окна меняй stats_window в переменных коллекции.",
+      "item": [
+        {
+          "name": "Окно по умолчанию — 24h",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Статистика товара и окно\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(String(body.product_id)).to.eql(pm.collectionVariables.get(\"product_id\"));",
+                  "    pm.expect(body.window).to.eql(\"24h\");",
+                  "    [\"view_count\", \"unique_view_days\", \"views_since_update\"].forEach(function (key) {",
+                  "        pm.expect(body[key]).to.be.a(\"number\").and.at.least(0);",
+                  "    });",
+                  "    [\"first_viewed_at\", \"last_viewed_at\"].forEach(function (key) {",
+                  "        pm.expect(body).to.have.property(key);",
+                  "        if (body[key] !== null) {",
+                  "            pm.expect(Number.isNaN(Date.parse(body[key]))).to.eql(false);",
+                  "        }",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}/stats",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}",
+                "stats"
+              ]
+            },
+            "description": "Выполни после создания товара и до удаления. GET товара сейчас не записывает просмотры: у нового товара счётчики будут 0, а first_viewed_at и last_viewed_at — null."
+          },
+          "response": []
+        },
+        {
+          "name": "Выбранное окно — {{stats_window}}",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Статистика товара и окно\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(String(body.product_id)).to.eql(pm.collectionVariables.get(\"product_id\"));",
+                  "    pm.expect(body.window).to.eql(pm.variables.get(\"stats_window\"));",
+                  "    [\"view_count\", \"unique_view_days\", \"views_since_update\"].forEach(function (key) {",
+                  "        pm.expect(body[key]).to.be.a(\"number\").and.at.least(0);",
+                  "    });",
+                  "    [\"first_viewed_at\", \"last_viewed_at\"].forEach(function (key) {",
+                  "        pm.expect(body).to.have.property(key);",
+                  "        if (body[key] !== null) {",
+                  "            pm.expect(Number.isNaN(Date.parse(body[key]))).to.eql(false);",
+                  "        }",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}/stats?window={{stats_window}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}",
+                "stats"
+              ],
+              "query": [
+                {
+                  "key": "window",
+                  "value": "{{stats_window}}"
+                }
+              ]
+            },
+            "description": "Выполни после создания товара и до удаления. GET товара сейчас не записывает просмотры: у нового товара счётчики будут 0, а first_viewed_at и last_viewed_at — null."
+          },
+          "response": []
+        },
+        {
+          "name": "За час — 1h",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Статистика товара и окно\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(String(body.product_id)).to.eql(pm.collectionVariables.get(\"product_id\"));",
+                  "    pm.expect(body.window).to.eql(\"1h\");",
+                  "    [\"view_count\", \"unique_view_days\", \"views_since_update\"].forEach(function (key) {",
+                  "        pm.expect(body[key]).to.be.a(\"number\").and.at.least(0);",
+                  "    });",
+                  "    [\"first_viewed_at\", \"last_viewed_at\"].forEach(function (key) {",
+                  "        pm.expect(body).to.have.property(key);",
+                  "        if (body[key] !== null) {",
+                  "            pm.expect(Number.isNaN(Date.parse(body[key]))).to.eql(false);",
+                  "        }",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}/stats?window=1h",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}",
+                "stats"
+              ],
+              "query": [
+                {
+                  "key": "window",
+                  "value": "1h"
+                }
+              ]
+            },
+            "description": "Выполни после создания товара и до удаления. GET товара сейчас не записывает просмотры: у нового товара счётчики будут 0, а first_viewed_at и last_viewed_at — null."
+          },
+          "response": []
+        },
+        {
+          "name": "За неделю — 7d",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Статистика товара и окно\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(String(body.product_id)).to.eql(pm.collectionVariables.get(\"product_id\"));",
+                  "    pm.expect(body.window).to.eql(\"7d\");",
+                  "    [\"view_count\", \"unique_view_days\", \"views_since_update\"].forEach(function (key) {",
+                  "        pm.expect(body[key]).to.be.a(\"number\").and.at.least(0);",
+                  "    });",
+                  "    [\"first_viewed_at\", \"last_viewed_at\"].forEach(function (key) {",
+                  "        pm.expect(body).to.have.property(key);",
+                  "        if (body[key] !== null) {",
+                  "            pm.expect(Number.isNaN(Date.parse(body[key]))).to.eql(false);",
+                  "        }",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}/stats?window=7d",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}",
+                "stats"
+              ],
+              "query": [
+                {
+                  "key": "window",
+                  "value": "7d"
+                }
+              ]
+            },
+            "description": "Выполни после создания товара и до удаления. GET товара сейчас не записывает просмотры: у нового товара счётчики будут 0, а first_viewed_at и last_viewed_at — null."
+          },
+          "response": []
+        },
+        {
+          "name": "За месяц — 30d",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Статистика товара и окно\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(String(body.product_id)).to.eql(pm.collectionVariables.get(\"product_id\"));",
+                  "    pm.expect(body.window).to.eql(\"30d\");",
+                  "    [\"view_count\", \"unique_view_days\", \"views_since_update\"].forEach(function (key) {",
+                  "        pm.expect(body[key]).to.be.a(\"number\").and.at.least(0);",
+                  "    });",
+                  "    [\"first_viewed_at\", \"last_viewed_at\"].forEach(function (key) {",
+                  "        pm.expect(body).to.have.property(key);",
+                  "        if (body[key] !== null) {",
+                  "            pm.expect(Number.isNaN(Date.parse(body[key]))).to.eql(false);",
+                  "        }",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}/stats?window=30d",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}",
+                "stats"
+              ],
+              "query": [
+                {
+                  "key": "window",
+                  "value": "30d"
+                }
+              ]
+            },
+            "description": "Выполни после создания товара и до удаления. GET товара сейчас не записывает просмотры: у нового товара счётчики будут 0, а first_viewed_at и last_viewed_at — null."
+          },
+          "response": []
+        },
+        {
+          "name": "За всё время — all",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Статистика товара и окно\", function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(String(body.product_id)).to.eql(pm.collectionVariables.get(\"product_id\"));",
+                  "    pm.expect(body.window).to.eql(\"all\");",
+                  "    [\"view_count\", \"unique_view_days\", \"views_since_update\"].forEach(function (key) {",
+                  "        pm.expect(body[key]).to.be.a(\"number\").and.at.least(0);",
+                  "    });",
+                  "    [\"first_viewed_at\", \"last_viewed_at\"].forEach(function (key) {",
+                  "        pm.expect(body).to.have.property(key);",
+                  "        if (body[key] !== null) {",
+                  "            pm.expect(Number.isNaN(Date.parse(body[key]))).to.eql(false);",
+                  "        }",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}/stats?window=all",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}",
+                "stats"
+              ],
+              "query": [
+                {
+                  "key": "window",
+                  "value": "all"
+                }
+              ]
+            },
+            "description": "Выполни после создания товара и до удаления. GET товара сейчас не записывает просмотры: у нового товара счётчики будут 0, а first_viewed_at и last_viewed_at — null."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "04. Validation errors",
+      "description": "Намеренно некорректные запросы. Ожидаются HTTP 400 и конкретный JSON-код ошибки.",
+      "item": [
+        {
+          "name": "Нет name — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"MISSING_REQUIRED_FIELDS\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: MISSING_REQUIRED_FIELDS. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"price\": 100}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Нет price — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"MISSING_REQUIRED_FIELDS\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: MISSING_REQUIRED_FIELDS. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Postman Tea\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Отрицательная цена — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"INVALID_PRODUCT\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: INVALID_PRODUCT. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Postman Tea\", \"price\": -1}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Пустое имя — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"INVALID_PRODUCT\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: INVALID_PRODUCT. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"   \", \"price\": 100}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Неизвестное поле — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"INVALID_JSON\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: INVALID_JSON. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Postman Tea\", \"price\": 100, \"unexpected\": true}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Повреждённый JSON — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"INVALID_JSON\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: INVALID_JSON. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Postman Tea\",",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Два JSON-объекта — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"MULTIPLE_JSON_VALUES\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: MULTIPLE_JSON_VALUES. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Postman Tea\", \"price\": 100} {}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Нет expected_version — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"INVALID_EXPECTED_VERSION\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: INVALID_EXPECTED_VERSION. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Postman Tea\", \"price\": 100}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Нулевая expected_version — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"INVALID_EXPECTED_VERSION\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: INVALID_EXPECTED_VERSION. Тело намеренно некорректно. Для URL с product_id сначала создай товар.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\": \"Postman Tea\", \"price\": 100, \"expected_version\": 0}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Некорректный ID — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"INVALID_ID\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "0"
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: INVALID_ID. Тело намеренно некорректно. Для URL с product_id сначала создай товар."
+          },
+          "response": []
+        },
+        {
+          "name": "Неподдерживаемое окно — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"INVALID_STATS_WINDOW\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}/stats?window=2h",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}",
+                "stats"
+              ],
+              "query": [
+                {
+                  "key": "window",
+                  "value": "2h"
+                }
+              ]
+            },
+            "description": "Ожидаемая ошибка запроса: INVALID_STATS_WINDOW. Тело намеренно некорректно. Для URL с product_id сначала создай товар."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "05. Cleanup",
+      "description": "Удаление созданного тестового товара и проверки 404. Запускай последней.",
+      "item": [
+        {
+          "name": "1. Удалить тестовый товар — 204",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 204\", function () {",
+                  "    pm.response.to.have.status(204);",
+                  "});",
+                  "pm.test(\"Ответ без тела\", function () {",
+                  "    pm.expect(pm.response.text()).to.eql(\"\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Выполни последним после остальных проверок. Удаляет товар, указанный в product_id. Ответ не содержит тела."
+          },
+          "response": []
+        },
+        {
+          "name": "2. Получить удалённый товар — 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"PRODUCT_NOT_FOUND\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Выполни после удаления. Проверяет отсутствие товара."
+          },
+          "response": []
+        },
+        {
+          "name": "3. Статистика удалённого товара — 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"PRODUCT_NOT_FOUND\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}/stats?window=all",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}",
+                "stats"
+              ],
+              "query": [
+                {
+                  "key": "window",
+                  "value": "all"
+                }
+              ]
+            },
+            "description": "Выполни после удаления. Для отсутствующего товара статистика также возвращает 404."
+          },
+          "response": []
+        },
+        {
+          "name": "4. Повторное удаление — 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "pm.test(\"JSON Content-Type\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+                  "});",
+                  "pm.test(\"Код ошибки\", function () {",
+                  "    pm.expect(pm.response.json().code).to.eql(\"PRODUCT_NOT_FOUND\");",
+                  "    pm.expect(pm.response.json().message).to.be.a(\"string\").and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Повторное удаление отсутствующего товара возвращает 404."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

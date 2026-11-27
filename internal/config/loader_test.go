@@ -5,9 +5,29 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
+const testPostgresYAML = "postgres:\n  dsn: postgres://localhost/test\n  startup_timeout: 5s\n  operation_timeout: 5s\n  db_pool:\n    max_open_conns: 20\n    max_idle_conns: 5\n    conn_max_lifetime: 30m\n    conn_max_idle_time: 5m\n"
+
 func TestLoadFromDir(t *testing.T) {
+	defaultHTTP := HttpServerConfig{
+		Addr:              ":8080",
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		ShutdownTimeout:   10 * time.Second,
+	}
+	overriddenHTTP := defaultHTTP
+	overriddenHTTP.Addr = ":9090"
+	// PostgreSQL is now required by Config.Validate, even in HTTP config tests.
+	postgresConfig := PostgresConfig{
+		DSN: "postgres://localhost/test",
+		Pool: PoolConfig{
+			MaxOpenConns: 20, MaxIdleConns: 5,
+			ConnMaxLifetime: 30 * time.Minute, ConnMaxIdleTime: 5 * time.Minute,
+		},
+		StartupTimeout: 5 * time.Second, OperationTimeout: 5 * time.Second,
+	}
 	tests := []struct {
 		name    string
 		env     string
@@ -22,17 +42,18 @@ func TestLoadFromDir(t *testing.T) {
 			yaml: "app:\n  name: cached-products\n",
 			want: Config{
 				App:        AppConfig{Name: "cached-products", Env: AppEnvLocal},
-				HttpServer: HttpServerConfig{Addr: ":8080"},
+				HttpServer: defaultHTTP,
 				Logger:     LoggerConfig{Level: LogLevelDebug, Format: LogFormatConsole},
 			},
 		},
 		{
-			name: "production defaults without YAML",
+			name: "production defaults",
 			env:  "production",
+			yaml: "app:\n  name: cached-products\n",
 			vars: map[string]string{"APP_APP_NAME": "cached-products"},
 			want: Config{
 				App:        AppConfig{Name: "cached-products", Env: AppEnvProduction},
-				HttpServer: HttpServerConfig{Addr: ":8080"},
+				HttpServer: defaultHTTP,
 				Logger:     LoggerConfig{Level: LogLevelDebug, Format: LogFormatJSON},
 			},
 		},
@@ -48,10 +69,11 @@ func TestLoadFromDir(t *testing.T) {
 			},
 			want: Config{
 				App:        AppConfig{Name: "env-name", Env: AppEnvLocal},
-				HttpServer: HttpServerConfig{Addr: ":9090"},
+				HttpServer: overriddenHTTP,
 				Logger:     LoggerConfig{Level: LogLevelWarn, Format: LogFormatConsole},
 			},
 		},
+		{name: "missing PostgreSQL without YAML", env: "production", vars: map[string]string{"APP_APP_NAME": "cached-products"}, wantErr: "DSN is required"},
 		{name: "missing APP_ENV", wantErr: "APP_ENV is required"},
 		{name: "invalid APP_ENV", env: "typo", wantErr: "unsupported APP_ENV"},
 		{name: "missing app name", env: "local", wantErr: "app.name is required"},
@@ -68,16 +90,14 @@ func TestLoadFromDir(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Environment is process-wide, so these subtests must run sequentially.
-			for _, key := range []string{"APP_ENV", "APP_APP_NAME", "APP_APP_ENV", "APP_HTTP_SERVER_ADDR", "APP_LOGGER_LEVEL", "APP_LOGGER_FORMAT"} {
-				t.Setenv(key, "")
-			}
+			clearConfigEnv(t)
 			t.Setenv("APP_ENV", tt.env)
 			for key, value := range tt.vars {
 				t.Setenv(key, value)
 			}
 			dir := t.TempDir()
 			if tt.yaml != "" {
-				if err := os.WriteFile(filepath.Join(dir, "env."+tt.env+".yml"), []byte(tt.yaml), 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, "env."+tt.env+".yml"), []byte(tt.yaml+"\n"+testPostgresYAML), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -92,6 +112,7 @@ func TestLoadFromDir(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			tt.want.Postgres = postgresConfig
 			if got != tt.want {
 				t.Fatalf("config = %+v, want %+v", got, tt.want)
 			}
@@ -100,9 +121,7 @@ func TestLoadFromDir(t *testing.T) {
 }
 
 func TestExampleConfig(t *testing.T) {
-	for _, key := range []string{"APP_APP_NAME", "APP_APP_ENV", "APP_HTTP_SERVER_ADDR", "APP_LOGGER_LEVEL", "APP_LOGGER_FORMAT"} {
-		t.Setenv(key, "")
-	}
+	clearConfigEnv(t)
 	// Use the same example file that users copy into env.local.yml.
 	data, err := os.ReadFile(filepath.Join("..", "..", "env.example.yml"))
 	if err != nil {
@@ -119,5 +138,15 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if cfg.App.Name != "cached-products" || cfg.App.Env != AppEnvLocal {
 		t.Fatalf("unexpected app config: %+v", cfg.App)
+	}
+}
+
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "APP_") {
+			t.Setenv(key, "")
+		}
 	}
 }
