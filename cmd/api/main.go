@@ -20,13 +20,33 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "load configuration:", err)
+		os.Exit(1)
+	}
+
+	log, err := logger.New(logger.Config{App: cfg.App, Logger: cfg.Logger})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create logger:", err)
+		os.Exit(1)
+	}
+
+	err = run(cfg, log)
+	if err != nil {
+		log.Error("application failed", "error", err)
+	}
+
+	_ = log.Sync()
+
+	if err != nil {
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(cfg config.Config, log *logger.Logger) error {
+	const op = "api.run"
+
 	signalCtx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -34,44 +54,34 @@ func run() error {
 	)
 	defer stop()
 
-	config, err := config.Load()
+	db, productsRepo, err := newPostgresStorage(signalCtx, cfg.Postgres)
 	if err != nil {
-		return fmt.Errorf("load configuration: %w", err)
-	}
-
-	l, err := logger.New(logger.Config{App: config.App, Logger: config.Logger})
-	if err != nil {
-		return fmt.Errorf("new logger: %w", err)
-	}
-
-	db, productsRepo, err := newPostgresStorage(signalCtx, config.Postgres)
-	if err != nil {
-		return fmt.Errorf("new postgres storage: %w", err)
+		return fmt.Errorf("%s: new postgres storage: %w", op, err)
 	}
 	defer db.Close()
 
-	server, err := newHttpServer(config.HttpServer, productsRepo, productsRepo, l)
+	server, err := newHttpServer(cfg.HttpServer, productsRepo, productsRepo, log)
 	if err != nil {
-		return fmt.Errorf("create HTTP handler: %w", err)
+		return fmt.Errorf("%s: create HTTP handler: %w", op, err)
 	}
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.ListenAndServe() }()
-	l.Info("starting HTTP server", "addr", config.HttpServer.Addr)
+	log.Info("starting HTTP server", "addr", cfg.HttpServer.Addr)
 
 	select {
 	case <-signalCtx.Done():
 	case err := <-serveErr:
 		if !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("serve HTTP: %w", err)
+			return fmt.Errorf("%s: serve HTTP: %w", op, err)
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.HttpServer.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HttpServer.ShutdownTimeout)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown HTTP Server: %w", err)
+		return fmt.Errorf("%s: shutdown HTTP server: %w", op, err)
 	}
 
 	return nil
